@@ -1,0 +1,4 @@
+runpod==1.7.10
+aiohttp==3.12.6
+aiohttp-jinja2==1.6
+PyYAML==6.0.2

@@ -1,0 +1,61 @@
+---
+runpod:
+  # Runpod API key
+  api_key: !secret runpod_api_key
+
+  pod:
+    name: comfyui
+    image_name: "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+    # 48GB VRAM
+    #gpu_type_id: "NVIDIA RTX A6000"
+    #gpu_type_id: "NVIDIA A40"
+    # 24GB VRAM
+    gpu_type_id: "NVIDIA RTX A5000"
+    cloud_type: "SECURE"
+    # 10 is fine without kohya_ss, or 25 with kohya_ss
+    container_disk_in_gb: 25
+    volume_mount_path: "/workspace"
+    network_volume_id: !secret runpod_network_volume_id
+    ports: "22/tcp"
+    env:
+      PUBLIC_KEY: !file "~/.ssh/id_ed25519.pub"
+    # Fallback to default /start.sh script if custom start script fails or is not present.
+    docker_args: "bash -c '/workspace/scripts/container/start.sh || /start.sh'"
+
+    # Debug - use Runpod's startup script that just starts sshd
+    #docker_args: "bash -c '/start.sh'"
+
+ssh:
+  # Update ~/.ssh/config with pod IP and port after connecting
+  update_ssh_config: yes
+
+web:
+  # Time in seconds between creating pod and starting to establish SSH connection
+  startup_wait_time: 30
+
+  # How often to double check if the pod is running
+  check_pod_interval: 120
+
+  # Number of seconds of no web activity before terminating pod
+  shutdown_timeout: 1800
+
+  proxies:
+    Status:
+      local_port: 8000
+
+      # No remote port - show status instead of proxying
+      remote_port: 0
+
+    ComfyUI:
+      # Port on local machine to forward to the pod
+      local_port: 8001
+
+      # Port on pod to proxy to
+      remote_port: 9020
+
+    Kohya_ss:
+      # Port on local machine to forward to the pod
+      local_port: 8002
+
+      # Port on pod to proxy to
+      remote_port: 7860

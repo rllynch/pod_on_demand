@@ -59,3 +59,9 @@ web:
 
       # Port on pod to proxy to
       remote_port: 7860
+
+periodic_tasks:
+  # Run sync script every 60 seconds while pod is running
+  sync:
+    interval: 60
+    command: "./sync"

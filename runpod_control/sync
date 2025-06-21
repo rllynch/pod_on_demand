@@ -1,0 +1,17 @@
+#!/bin/bash
+
+set -eu
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+RSYNC="rsync -rlv"
+
+# Runpod => Local
+for SUBDIR in "ComfyUI/output/" "lora/output/" "lora/logs/" ; do
+    $RSYNC "comfyui:/workspace/$SUBDIR" "$SCRIPT_DIR/../workspace/$SUBDIR"
+done
+
+# Local => Runpod
+for SUBDIR in "lora/config/" "lora/input/" ; do
+    $RSYNC "$SCRIPT_DIR/../workspace/$SUBDIR" "comfyui:/workspace/$SUBDIR"
+done

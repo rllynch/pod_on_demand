@@ -11,6 +11,7 @@ import pprint
 import logging
 import contextlib
 import asyncio
+import subprocess
 from datetime import datetime
 from time import time
 from types import SimpleNamespace
@@ -152,6 +153,8 @@ async def handle_proxy_request(request):
     start_pod = not any(request.raw_path.startswith(path) for path in dont_wake_paths)
     if not is_web_socket and start_pod:
         # Don't start the pod for websocket connections - only for regular HTTP requests
+        if not request.app['state'].need_pod:
+            logging.info(f"{request.app['name']} web activity detected, starting pod")
         request.app['state'].last_web_activity = time()
         request.app['state'].need_pod = True
         logger.debug(f'Web activity: {request.raw_path}')
@@ -230,9 +233,10 @@ async def status_reporter(global_state):
         if do_report:
             log_func = logger.info if global_state.pod.pod_running or state_change else logger.debug
             last_web_activity = max([proxy.last_web_activity for proxy in global_state.proxies])
+            last_web_activity = f'{(time()-last_web_activity)/60:.1f} minutes ago' if last_web_activity else 'never'
             log_func(f"pod_running={global_state.pod.pod_running} "
                         f"ssh_running={global_state.ssh.ssh_running} "
-                        f"last_web_activity={(time()-last_web_activity)/60:.1f} minutes ago")
+                        f"last_web_activity={last_web_activity}")
 
             last_report_time = time()
             last_pod_running = global_state.pod.pod_running
@@ -252,6 +256,9 @@ async def monitor_pod(pod_state, proxies_state, config):
     last_pod_running_check = 0
     startup_wait_time = config['web']['startup_wait_time']
     check_pod_interval = config['web']['check_pod_interval']
+    periodic_tasks = config['periodic_tasks']
+    for task_name, task in periodic_tasks.items():
+        task['last_run'] = 0
 
     while True:
         try:
@@ -270,6 +277,20 @@ async def monitor_pod(pod_state, proxies_state, config):
                 # Give it a little time to start
                 await asyncio.sleep(startup_wait_time)
                 pod_state.need_ssh = True
+
+            if pod_state.pod_running:
+                # Check if any periodic tasks need to run
+                for task_name, task in periodic_tasks.items():
+                    if time() - task['last_run'] >= task['interval']:
+                        logger.debug(f'Running periodic task "{task_name}": {task["command"]}')
+                        cp = subprocess.run(task['command'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        if cp.returncode != 0:
+                            for line in cp.stdout.decode('utf-8', errors='ignore').splitlines():
+                                logger.error(f'{task_name}: {line}')
+                            logger.error(f'Periodic task "{task_name}" failed with code {cp.returncode}')
+                        else:
+                            logger.info(f'Periodic task "{task_name}" completed successfully')
+                        task['last_run'] = time()
 
             if pod_state.pod_running and not need_pod:
                 logger.info("Destroying pod...")
@@ -381,7 +402,10 @@ async def proxy_idle_detection(app: web.Application):
     while True:
         try:
             if app['state'].need_pod and time() - app['state'].last_web_activity > shutdown_timeout:
-                logger.info(f"No {app['state'].name} web activity for {app['config']['web']['shutdown_timeout']//60} minutes, setting need_pod to False...")
+                if app['state'].last_web_activity:
+                    logger.info(f"No {app['state'].name} web activity for {app['config']['web']['shutdown_timeout']//60} minutes, setting need_pod to False...")
+                else:
+                    logger.info(f"Immediate shutdown requested, setting need_pod to False for {app['state'].name}...")
                 app['state'].need_pod = False
 
             if app['state'].scheduled_shutdown and time() >= app['state'].scheduled_shutdown:
@@ -498,7 +522,7 @@ async def handle_status(request):
 
     return aiohttp_jinja2.render_template('status.html', request, context)
 
-async def create_app(port_cfg, global_state, proxy_state, config):
+async def create_app(name, port_cfg, global_state, proxy_state, config):
     """
     Create and configure the aiohttp web application.
 
@@ -512,6 +536,7 @@ async def create_app(port_cfg, global_state, proxy_state, config):
     """
     app = web.Application()
 
+    app['name'] = name
     app['config'] = config
     app['port_cfg'] = port_cfg
     app['global_state'] = global_state
@@ -542,7 +567,7 @@ async def create_app(port_cfg, global_state, proxy_state, config):
     return app
 
 runners = []
-async def start_site(port_cfg, global_state, proxy_state, config):
+async def start_site(name, port_cfg, global_state, proxy_state, config):
     """
     Start a web server site for a specific port configuration.
 
@@ -553,11 +578,12 @@ async def start_site(port_cfg, global_state, proxy_state, config):
     """
     listen_address = '127.0.0.1'
     listen_port = port_cfg['local_port']
-    app = await create_app(port_cfg, global_state, proxy_state, config)
+    app = await create_app(name, port_cfg, global_state, proxy_state, config)
     runner = web.AppRunner(app)
     runners.append(runner)
     await runner.setup()
     site = web.TCPSite(runner, listen_address, listen_port)
+    logging.info(f"{name} at http://{listen_address}:{listen_port}/")
     await site.start()
 
 def main():
@@ -612,7 +638,7 @@ def main():
         )
         global_state.proxies.append(proxy_state)
 
-        loop.create_task(start_site(port_cfg=port_cfg, global_state=global_state,
+        loop.create_task(start_site(name=port_name, port_cfg=port_cfg, global_state=global_state,
                                     proxy_state=proxy_state, config=config))
 
     loop.create_task(monitor_pod(global_state.pod, global_state.proxies, config))

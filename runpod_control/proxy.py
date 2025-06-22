@@ -12,6 +12,8 @@ import logging
 import contextlib
 import asyncio
 import subprocess
+import argparse
+import socket
 from datetime import datetime
 from time import time
 from types import SimpleNamespace
@@ -154,15 +156,18 @@ async def handle_proxy_request(request):
     if not is_web_socket and start_pod:
         # Don't start the pod for websocket connections - only for regular HTTP requests
         if not request.app['state'].need_pod:
-            logging.info(f"{request.app['name']} web activity detected, starting pod")
+            logger.info(f"{request.app['name']} web activity detected, starting pod")
         request.app['state'].last_web_activity = time()
         request.app['state'].need_pod = True
         logger.debug(f'Web activity: {request.raw_path}')
 
     if not request.app['global_state'].ssh.ssh_running:
         # Show starting page while pod is starting up
+        context = {
+            'name': request.app['name'],
+        }
         response = aiohttp_jinja2.render_template("starting.html", request,
-                                        context={})
+                                        context=context)
         return response
 
     # Pod and SSH are up - forward request to backend server
@@ -234,9 +239,13 @@ async def status_reporter(global_state):
             log_func = logger.info if global_state.pod.pod_running or state_change else logger.debug
             last_web_activity = max([proxy.last_web_activity for proxy in global_state.proxies])
             last_web_activity = f'{(time()-last_web_activity)/60:.1f} minutes ago' if last_web_activity else 'never'
-            log_func(f"pod_running={global_state.pod.pod_running} "
-                        f"ssh_running={global_state.ssh.ssh_running} "
-                        f"last_web_activity={last_web_activity}")
+            last_cpu_gpu_activity = f'{(time()-global_state.ssh.last_activity)/60:.1f} minutes ago' if global_state.ssh.last_activity else 'never'
+            log_func(f"pod_running={global_state.pod.pod_running}, "
+                        f"ssh_running={global_state.ssh.ssh_running}, "
+                        f"last_web_activity={last_web_activity}, "
+                        f"cpu_usage={global_state.ssh.cpu_usage:.0f}%, "
+                        f"gpu_usage={global_state.ssh.gpu_usage:.0f}%, "
+                        f"last_cpu_gpu_activity={last_cpu_gpu_activity}")
 
             last_report_time = time()
             last_pod_running = global_state.pod.pod_running
@@ -244,7 +253,7 @@ async def status_reporter(global_state):
 
         await asyncio.sleep(1)
 
-async def monitor_pod(pod_state, proxies_state, config):
+async def monitor_pod(pod_state, proxies_state, ssh_state, config):
     """
     Monitor pod status and automatically start/stop pods based on demand.
 
@@ -268,7 +277,7 @@ async def monitor_pod(pod_state, proxies_state, config):
 
             pod_state.need_ssh = pod_state.pod_running
 
-            need_pod = any(proxy.need_pod for proxy in proxies_state)
+            need_pod = any(proxy.need_pod for proxy in proxies_state) or ssh_state.need_pod
             if need_pod and not pod_state.pod_running:
                 logger.info("Pod is not running, starting pod...")
                 create_pod()
@@ -289,7 +298,7 @@ async def monitor_pod(pod_state, proxies_state, config):
                                 logger.error(f'{task_name}: {line}')
                             logger.error(f'Periodic task "{task_name}" failed with code {cp.returncode}')
                         else:
-                            logger.info(f'Periodic task "{task_name}" completed successfully')
+                            logger.debug(f'Periodic task "{task_name}" completed successfully')
                         task['last_run'] = time()
 
             if pod_state.pod_running and not need_pod:
@@ -306,6 +315,67 @@ async def monitor_pod(pod_state, proxies_state, config):
             pod_state.pod_running = False
             pod_state.need_ssh = False
             await asyncio.sleep(30)
+
+async def handle_ssh_output(proc, ssh_state, ssh_config):
+    status_section = None
+    total_cpu_usage = 0
+    total_gpu_usage = 0
+    last_was_active = None
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break  # EOF
+        line = line.decode('utf-8', errors='ignore').strip()
+        logger.debug(f"SSH output: {line}")
+
+        if line.startswith('---'):
+            status_section = line[3:]
+            if status_section == 'sleep':
+                # Record accumulated status and reset
+                ssh_state.cpu_usage = total_cpu_usage
+                ssh_state.gpu_usage = total_gpu_usage
+
+                is_active = ssh_state.cpu_usage >= ssh_config['cpu_usage_threshold'] or ssh_state.gpu_usage >= ssh_config['gpu_usage_threshold']
+                if is_active != last_was_active:
+                    logger.info(f"CPU/GPU status changed to: {'active' if is_active else 'idle'}")
+                    last_was_active = is_active
+                if is_active:
+                    if not ssh_state.need_pod:
+                        logger.info(f"CPU usage: {ssh_state.cpu_usage:.0f}%, GPU usage: {ssh_state.gpu_usage:.0f}% - setting need_pod to True")
+                        ssh_state.need_pod = True
+                    ssh_state.last_activity = time()
+
+                idle_time = time() - ssh_state.last_activity
+                if idle_time > ssh_config['shutdown_timeout'] and ssh_state.need_pod:
+                    logger.info(f"CPU and GPU have been idle for {idle_time:.0f} seconds, setting need_pod to False")
+                    ssh_state.need_pod = False
+
+                total_cpu_usage = 0
+                total_gpu_usage = 0
+        elif status_section == 'nvidia-smi':
+            idx, usage = line.replace(' ', '').split(',')
+            total_gpu_usage += float(usage)
+            logger.debug(f'GPU{idx} usage: {usage}')
+        elif status_section == 'top':
+            # Prior to first iteration's list of processes
+            if line.startswith('PID USER'):
+                status_section = 'top_iter0'
+        elif status_section == 'top_iter0':
+            # First iteration's list of processes
+            if line.startswith('PID USER'):
+                status_section = 'top_iter1'
+        elif status_section == 'top_iter1':
+            # Second iteration's list of processes
+            cpu_usage = line.split()[8]
+            command = line.split()[11]
+            logger.debug(f"CPU usage: {cpu_usage}, Command: {command}")
+            total_cpu_usage += float(cpu_usage)
+        elif status_section == 'sleep':
+            pass
+        elif status_section is None:
+            pass
+        else:
+            logger.error(f"Unknown status section: {status_section}")
 
 async def monitor_ssh(ssh_state, pod_state, config):
     """
@@ -345,10 +415,14 @@ async def monitor_ssh(ssh_state, pod_state, config):
                 ] + port_forward_args + [
                     '-p', str(ssh_state.ssh_port),
                     f'root@{ssh_state.ssh_ip}',
-                    'sleep', 'infinity'
+                    config['ssh']['status_command']
                 ]
                 logger.info(f"Running command: {' '.join(cmd)}")
-                proc = await asyncio.create_subprocess_exec(*cmd, preexec_fn=os.setpgrp)
+                proc = await asyncio.create_subprocess_exec(*cmd, preexec_fn=os.setpgrp,
+                                                            stdout=asyncio.subprocess.PIPE,
+                                                            stderr=asyncio.subprocess.STDOUT)
+
+                await handle_ssh_output(proc, ssh_state, config['ssh'])
                 await proc.wait()
                 ssh_state.ssh_running = False
                 logger.info("SSH connection closed.")
@@ -576,14 +650,15 @@ async def start_site(name, port_cfg, global_state, proxy_state, config):
         global_state: Global application state
         proxy_state: State specific to this proxy instance
     """
-    listen_address = '127.0.0.1'
+    listen_address = port_cfg['local_bind_address']
     listen_port = port_cfg['local_port']
+    url_address = socket.gethostname() if listen_address == '0.0.0.0' else listen_address
     app = await create_app(name, port_cfg, global_state, proxy_state, config)
     runner = web.AppRunner(app)
     runners.append(runner)
     await runner.setup()
     site = web.TCPSite(runner, listen_address, listen_port)
-    logging.info(f"{name} at http://{listen_address}:{listen_port}/")
+    logging.info(f"{name} at http://{url_address}:{listen_port}/")
     await site.start()
 
 def main():
@@ -593,7 +668,11 @@ def main():
     Initializes the event loop, creates proxy servers for each configured port,
     and starts monitoring tasks for pods and SSH connections.
     """
-    debug = False
+    parser = argparse.ArgumentParser(description='Automatic RunPod start/stop and reverse proxy service')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    args = parser.parse_args()
+
+    debug = args.debug
     setup_runpod()
     config = get_config()
 
@@ -620,6 +699,8 @@ def main():
 
         ssh=SimpleNamespace(
             ssh_running=False,
+            cpu_usage=0, gpu_usage=0,
+            last_activity=0, need_pod=False,
             ssh_ip=None, ssh_port=None,
         ),
 
@@ -641,7 +722,7 @@ def main():
         loop.create_task(start_site(name=port_name, port_cfg=port_cfg, global_state=global_state,
                                     proxy_state=proxy_state, config=config))
 
-    loop.create_task(monitor_pod(global_state.pod, global_state.proxies, config))
+    loop.create_task(monitor_pod(global_state.pod, global_state.proxies, global_state.ssh, config))
     loop.create_task(monitor_ssh(global_state.ssh, global_state.pod, config))
     loop.create_task(status_reporter(global_state))
     if config['ssh']['update_ssh_config']:

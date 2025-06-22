@@ -4,7 +4,7 @@ set -eu
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-RSYNC="rsync -rlv"
+RSYNC="rsync -rtlv"
 
 # Runpod => Local
 for SUBDIR in "ComfyUI/output/" "lora/output/" "lora/logs/" ; do

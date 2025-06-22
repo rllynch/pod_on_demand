@@ -6,10 +6,10 @@ runpod:
   pod:
     name: comfyui
     image_name: "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
-    # 48GB VRAM
+    # 50GB RAM / 48GB VRAM
     #gpu_type_id: "NVIDIA RTX A6000"
     #gpu_type_id: "NVIDIA A40"
-    # 24GB VRAM
+    # 50GB RAM / 24GB VRAM
     gpu_type_id: "NVIDIA RTX A5000"
     cloud_type: "SECURE"
     # 10 is fine without kohya_ss, or 25 with kohya_ss
@@ -29,6 +29,18 @@ ssh:
   # Update ~/.ssh/config with pod IP and port after connecting
   update_ssh_config: yes
 
+  # Location of status loop script
+  status_command: "/workspace/scripts/container/status_loop.sh"
+
+  # Percentage CPU usage to prevent pod being terminated
+  cpu_usage_threshold: 25
+
+  # Percentage GPU usage to prevent pod being terminated
+  gpu_usage_threshold: 10
+
+  # How long for CPU and GPU to below above thresholds before pod is terminated
+  shutdown_timeout: 1800
+
 web:
   # Time in seconds between creating pod and starting to establish SSH connection
   startup_wait_time: 30
@@ -41,6 +53,7 @@ web:
 
   proxies:
     Status:
+      local_bind_address: "127.0.0.1"
       local_port: 8000
 
       # No remote port - show status instead of proxying
@@ -48,6 +61,7 @@ web:
 
     ComfyUI:
       # Port on local machine to forward to the pod
+      local_bind_address: "127.0.0.1"
       local_port: 8001
 
       # Port on pod to proxy to
@@ -55,6 +69,7 @@ web:
 
     Kohya_ss:
       # Port on local machine to forward to the pod
+      local_bind_address: "127.0.0.1"
       local_port: 8002
 
       # Port on pod to proxy to

@@ -20,8 +20,10 @@ if pgrep -f "gui.sh" > /dev/null ; then
 else
     # Not running
     echo "Starting Kohya_ss..."
-    no_proxy="localhost, 127.0.0.1, ::1" nohup ./gui.sh --headless
-    tail --retry -f nohup.out &
+    # This needs work
+    #no_proxy="localhost, 127.0.0.1, ::1" nohup ./gui.sh --headless
+    #tail --retry -f nohup.out &
+    ./gui.sh --headless
 fi
 
 iter=0

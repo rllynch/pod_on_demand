@@ -30,13 +30,13 @@ ssh:
   update_ssh_config: yes
 
   # Location of status loop script
-  status_command: "/workspace/scripts/container/status_loop.sh"
+  status_command: "/workspace/scripts/container/status_loop.py"
 
-  # Percentage CPU usage to prevent pod being terminated
-  cpu_usage_threshold: 25
+  # Percentage CPU utilization to prevent pod being terminated
+  cpu_util_threshold: 10
 
-  # Percentage GPU usage to prevent pod being terminated
-  gpu_usage_threshold: 10
+  # Percentage GPU utilization to prevent pod being terminated
+  gpu_util_threshold: 10
 
   # How long for CPU and GPU to below above thresholds before pod is terminated
   shutdown_timeout: 1800

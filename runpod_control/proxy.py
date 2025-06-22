@@ -14,6 +14,7 @@ import asyncio
 import subprocess
 import argparse
 import socket
+import json
 from datetime import datetime
 from time import time
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ import runpod
 
 from config import get_config, setup_runpod
 from create import create_pod
+from resume import resume_pod
 from update_ssh_config import get_ssh_ip_port, update_ssh_config
 from destroy import terminate_pod
 
@@ -65,14 +67,14 @@ async def handle_websocket_proxy(ws_client, ws_backend_server, state):
                 else:
                     logger.warning(f'Unknown message type: {msg.type}')
 
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             logger.error(f'Error forwarding {direction} messages: {e}')
         finally:
             try:
                 if not ws_to.closed:
                     await ws_to.close()
             except asyncio.CancelledError:
-                logger.debug(f'WebSocket cancelled')
+                logger.debug('WebSocket cancelled')
 
     # Create tasks for bidirectional forwarding
     client_to_server = asyncio.create_task(
@@ -83,7 +85,7 @@ async def handle_websocket_proxy(ws_client, ws_backend_server, state):
     )
 
     # Wait for either direction to complete
-    done, pending = await asyncio.wait(
+    _, pending = await asyncio.wait(
         [client_to_server, server_to_client],
         return_when=asyncio.FIRST_COMPLETED
     )
@@ -187,7 +189,7 @@ async def handle_proxy_request(request):
 
                 await handle_websocket_proxy(ws_client, ws_backend_server, request.app['state'])
 
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             logger.error(f'Failed to connect to upstream server: {e}')
             await ws_client.close()
 
@@ -196,7 +198,7 @@ async def handle_proxy_request(request):
     else:
         return await handle_http_proxy(request, client_session, backend_url)
 
-def is_pod_running():
+def is_pod_running(name):
     """
     Check if RunPod pod for this application is currently running.
 
@@ -204,7 +206,10 @@ def is_pod_running():
         bool: True if at least one pod is running, False otherwise
     """
     pod_list = runpod.get_pods()
+    pod_list = [pod for pod in pod_list if pod['name'] == name]
     if len(pod_list) == 0:
+        return False
+    if pod_list[0]['desiredStatus'] != 'RUNNING':
         return False
     return True
 
@@ -243,8 +248,10 @@ async def status_reporter(global_state):
             log_func(f"pod_running={global_state.pod.pod_running}, "
                         f"ssh_running={global_state.ssh.ssh_running}, "
                         f"last_web_activity={last_web_activity}, "
-                        f"cpu_usage={global_state.ssh.cpu_usage:.0f}%, "
-                        f"gpu_usage={global_state.ssh.gpu_usage:.0f}%, "
+                        f"cpu_util={global_state.ssh.cpu_util:.0f}%, "
+                        f"gpu_util={global_state.ssh.gpu_util:.0f}%, "
+                        f"cpu_mem={global_state.ssh.cpu_mem_gb:.1f}GB, "
+                        f"gpu_mem={global_state.ssh.gpu_mem_gb:.1f}GB, "
                         f"last_cpu_gpu_activity={last_cpu_gpu_activity}")
 
             last_report_time = time()
@@ -252,6 +259,18 @@ async def status_reporter(global_state):
             last_ssh_running = global_state.ssh.ssh_running
 
         await asyncio.sleep(1)
+
+def create_or_resume_pod(name):
+    """
+    Resume an existing pod if it exists or create a new pod.
+    """
+    pod_list = runpod.get_pods()
+    pod_list = [pod for pod in pod_list if pod['name'] == name]
+
+    if len(pod_list) == 0:
+        create_pod()
+    else:
+        resume_pod()
 
 async def monitor_pod(pod_state, proxies_state, ssh_state, config):
     """
@@ -272,7 +291,7 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
     while True:
         try:
             if time() - last_pod_running_check > check_pod_interval:
-                pod_state.pod_running = is_pod_running()
+                pod_state.pod_running = is_pod_running(config['runpod']['pod']['name'])
                 last_pod_running_check = time()
 
             pod_state.need_ssh = pod_state.pod_running
@@ -280,7 +299,7 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
             need_pod = any(proxy.need_pod for proxy in proxies_state) or ssh_state.need_pod
             if need_pod and not pod_state.pod_running:
                 logger.info("Pod is not running, starting pod...")
-                create_pod()
+                create_or_resume_pod(config['runpod']['pod']['name'])
                 pod_state.pod_running = True
                 pod_state.pod_start_time = time()
                 # Give it a little time to start
@@ -292,7 +311,9 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
                 for task_name, task in periodic_tasks.items():
                     if time() - task['last_run'] >= task['interval']:
                         logger.debug(f'Running periodic task "{task_name}": {task["command"]}')
-                        cp = subprocess.run(task['command'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        cp = subprocess.run(task['command'],
+                                            shell=True, check=False,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         if cp.returncode != 0:
                             for line in cp.stdout.decode('utf-8', errors='ignore').splitlines():
                                 logger.error(f'{task_name}: {line}')
@@ -310,16 +331,16 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
 
             await asyncio.sleep(10)
 
-        except Exception as ex:
+        except Exception as ex: # pylint: disable=broad-exception-caught
             logger.error(f"Error in pod monitoring: {ex}")
             pod_state.pod_running = False
             pod_state.need_ssh = False
             await asyncio.sleep(30)
 
 async def handle_ssh_output(proc, ssh_state, ssh_config):
-    status_section = None
-    total_cpu_usage = 0
-    total_gpu_usage = 0
+    """
+    Handle the utilization metrics from status_loop.py on the pod.
+    """
     last_was_active = None
     while True:
         line = await proc.stdout.readline()
@@ -327,55 +348,29 @@ async def handle_ssh_output(proc, ssh_state, ssh_config):
             break  # EOF
         line = line.decode('utf-8', errors='ignore').strip()
         logger.debug(f"SSH output: {line}")
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError as ex:
+            logging.error(f"{ex}: Failed to decode JSON from SSH output: {line}")
+            continue
 
-        if line.startswith('---'):
-            status_section = line[3:]
-            if status_section == 'sleep':
-                # Record accumulated status and reset
-                ssh_state.cpu_usage = total_cpu_usage
-                ssh_state.gpu_usage = total_gpu_usage
+        for key, value in data.items():
+            setattr(ssh_state, key, value)
 
-                is_active = ssh_state.cpu_usage >= ssh_config['cpu_usage_threshold'] or ssh_state.gpu_usage >= ssh_config['gpu_usage_threshold']
-                if is_active != last_was_active:
-                    logger.info(f"CPU/GPU status changed to: {'active' if is_active else 'idle'}")
-                    last_was_active = is_active
-                if is_active:
-                    if not ssh_state.need_pod:
-                        logger.info(f"CPU usage: {ssh_state.cpu_usage:.0f}%, GPU usage: {ssh_state.gpu_usage:.0f}% - setting need_pod to True")
-                        ssh_state.need_pod = True
-                    ssh_state.last_activity = time()
+        is_active = ssh_state.cpu_util >= ssh_config['cpu_util_threshold'] or ssh_state.gpu_util >= ssh_config['gpu_util_threshold']
+        if is_active != last_was_active:
+            logger.info(f"CPU/GPU status changed to: {'active' if is_active else 'idle'}")
+            last_was_active = is_active
+        if is_active:
+            if not ssh_state.need_pod:
+                logger.info(f"CPU usage: {ssh_state.cpu_util:.0f}%, GPU usage: {ssh_state.gpu_util:.0f}% - setting need_pod to True")
+                ssh_state.need_pod = True
+            ssh_state.last_activity = time()
 
-                idle_time = time() - ssh_state.last_activity
-                if idle_time > ssh_config['shutdown_timeout'] and ssh_state.need_pod:
-                    logger.info(f"CPU and GPU have been idle for {idle_time:.0f} seconds, setting need_pod to False")
-                    ssh_state.need_pod = False
-
-                total_cpu_usage = 0
-                total_gpu_usage = 0
-        elif status_section == 'nvidia-smi':
-            idx, usage = line.replace(' ', '').split(',')
-            total_gpu_usage += float(usage)
-            logger.debug(f'GPU{idx} usage: {usage}')
-        elif status_section == 'top':
-            # Prior to first iteration's list of processes
-            if line.startswith('PID USER'):
-                status_section = 'top_iter0'
-        elif status_section == 'top_iter0':
-            # First iteration's list of processes
-            if line.startswith('PID USER'):
-                status_section = 'top_iter1'
-        elif status_section == 'top_iter1':
-            # Second iteration's list of processes
-            cpu_usage = line.split()[8]
-            command = line.split()[11]
-            logger.debug(f"CPU usage: {cpu_usage}, Command: {command}")
-            total_cpu_usage += float(cpu_usage)
-        elif status_section == 'sleep':
-            pass
-        elif status_section is None:
-            pass
-        else:
-            logger.error(f"Unknown status section: {status_section}")
+        idle_time = time() - ssh_state.last_activity
+        if idle_time > ssh_config['shutdown_timeout'] and ssh_state.need_pod:
+            logger.info(f"CPU and GPU have been idle for {idle_time:.0f} seconds, setting need_pod to False")
+            ssh_state.need_pod = False
 
 async def monitor_ssh(ssh_state, pod_state, config):
     """
@@ -429,7 +424,7 @@ async def monitor_ssh(ssh_state, pod_state, config):
                 await asyncio.sleep(10)
             else:
                 await asyncio.sleep(30)
-        except Exception as ex:
+        except Exception as ex: # pylint: disable=broad-exception-caught
             logger.error(f"Error in SSH monitoring: {ex}")
             ssh_state.ssh_running = False
             await asyncio.sleep(30)
@@ -451,7 +446,7 @@ async def update_ssh_config_task(ssh_state):
             if last_ssh_running and not ssh_state.ssh_running:
                 last_ssh_running = False
 
-        except Exception as ex:
+        except Exception as ex: # pylint: disable=broad-exception-caught
             logger.error(f"Error in SSH config update: {ex}")
 
         await asyncio.sleep(5)
@@ -487,7 +482,7 @@ async def proxy_idle_detection(app: web.Application):
                 immediate_shutdown(app['global_state'])
                 app['state'].scheduled_shutdown = None
 
-        except Exception as ex:
+        except Exception as ex: # pylint: disable=broad-exception-caught
             logger.error(f"Error in proxy idle detection: {ex}")
 
         await asyncio.sleep(10)
@@ -545,11 +540,17 @@ async def handle_immediate_shutdown(request):
     return web.json_response({'status': 'success'})
 
 def format_timestamp(timestamp):
+    """
+    Format a unix timestamp into a human-readable string.
+    """
     if timestamp:
         return datetime.fromtimestamp(timestamp).strftime('%m/%d/%Y %H:%M:%S')
     return None
 
 def format_duration(raw_seconds):
+    """
+    Format a duration in seconds into HH:MM:SS format.
+    """
     hours, remainder = divmod(raw_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
@@ -658,7 +659,7 @@ async def start_site(name, port_cfg, global_state, proxy_state, config):
     runners.append(runner)
     await runner.setup()
     site = web.TCPSite(runner, listen_address, listen_port)
-    logging.info(f"{name} at http://{url_address}:{listen_port}/")
+    logger.info(f"{name} at http://{url_address}:{listen_port}/")
     await site.start()
 
 def main():
@@ -688,7 +689,7 @@ def main():
 
     loop = asyncio.get_event_loop()
 
-    initial_pod_running = is_pod_running()
+    initial_pod_running = is_pod_running(config['runpod']['pod']['name'])
 
     global_state = SimpleNamespace(
         pod=SimpleNamespace(
@@ -699,7 +700,7 @@ def main():
 
         ssh=SimpleNamespace(
             ssh_running=False,
-            cpu_usage=0, gpu_usage=0,
+            cpu_util=0, gpu_util=0, cpu_mem_gb=0, gpu_mem_gb=0,
             last_activity=0, need_pod=False,
             ssh_ip=None, ssh_port=None,
         ),
@@ -730,7 +731,7 @@ def main():
 
     try:
         loop.run_forever()
-    except Exception as ex:
+    except Exception as ex: # pylint: disable=broad-exception-caught
         logger.error(f"Exception in main(): {ex}")
     finally:
         for runner in runners:

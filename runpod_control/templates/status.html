@@ -262,6 +262,26 @@
                     <span class="metric-label">Uptime:</span>
                     <span class="metric-value">{{ pod_uptime or 'N/A' }}</span>
                 </div>
+                <div class="metric">
+                    <span class="metric-label">Last Activity:</span>
+                    <span class="metric-value">{{ pod_last_activity_time or 'Never' }}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">CPU Utilization:</span>
+                    <span class="metric-value">{{ cpu_util }}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">GPU Utilization:</span>
+                    <span class="metric-value">{{ gpu_util }}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">CPU Memory:</span>
+                    <span class="metric-value">{{ cpu_mem }}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">GPU Memory:</span>
+                    <span class="metric-value">{{ gpu_mem }}</span>
+                </div>
             </div>
 
             <div class="status-card">

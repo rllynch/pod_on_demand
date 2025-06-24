@@ -21,7 +21,7 @@ def resume_pod():
     pod = pod_list[0]
     logger.info(f'Resuming pod: {pod}')
 
-    runpod.resume_pod(pod['id'], gpu_count=1)
+    return runpod.resume_pod(pod['id'], gpu_count=1)
 
 def main():
     logging.basicConfig(level=logging.INFO)

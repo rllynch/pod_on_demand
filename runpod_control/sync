@@ -15,3 +15,5 @@ done
 for SUBDIR in "lora/config/" "lora/input/" ; do
     $RSYNC "$SCRIPT_DIR/../workspace/$SUBDIR" "comfyui:/workspace/$SUBDIR"
 done
+
+$SCRIPT_DIR/backup.sh

@@ -33,3 +33,7 @@ if [ -d "${install_root}/home" ]; then
 else
     echo "No home directory found at ${install_root}/home, skipping rsync."
 fi
+
+# This is mostly for interactive use - HF_HOME and PIP_CACHE_DIR already point at /workspace/.cache
+rm -rf /root/.cache
+ln -sf /workspace/.cache /root/.cache

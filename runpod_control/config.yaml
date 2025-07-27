@@ -10,12 +10,21 @@ runpod:
     #gpu_type_id: "NVIDIA RTX A6000"
     #gpu_type_id: "NVIDIA A40"
     # 50GB RAM / 24GB VRAM
-    gpu_type_id: "NVIDIA RTX A5000"
+    #gpu_type_id: "NVIDIA RTX A5000"
+
+    # 94GB RAM / 48GB VRAM
+    gpu_type_id: "NVIDIA RTX 6000 Ada Generation"
+
     cloud_type: "SECURE"
+
     # 10 is fine without kohya_ss, or 25 with kohya_ss
     container_disk_in_gb: 25
     volume_mount_path: "/workspace"
+
+    # Either volume_in_gb or network_volume_id must be set
+    #volume_in_gb: 200
     network_volume_id: !secret runpod_network_volume_id
+
     ports: "22/tcp"
     env:
       PUBLIC_KEY: !file "~/.ssh/id_ed25519.pub"
@@ -24,6 +33,24 @@ runpod:
 
     # Debug - use Runpod's startup script that just starts sshd
     #docker_args: "bash -c '/start.sh'"
+
+  modules:
+    - huggingface
+    - comfyui
+    - wan
+    - ollama
+    #- kohya_ss
+
+  models:
+    - flux_common
+    #- flux_inpainting
+    - wan_common
+    #- wan_t2v
+    #- wan_vace
+    #- wan_i2v
+    - cosmos
+    - cosmos_2b
+    - cosmos_14b
 
 ssh:
   # Update ~/.ssh/config with pod IP and port after connecting
@@ -43,7 +70,7 @@ ssh:
 
 web:
   # Time in seconds between creating pod and starting to establish SSH connection
-  startup_wait_time: 30
+  startup_wait_time: 10
 
   # How often to double check if the pod is running
   check_pod_interval: 120

@@ -1,3 +1,7 @@
+if [ -f /workspace/scripts/container/.env.sh ]; then
+    source /workspace/scripts/container/.env.sh
+fi
+
 # Cache HF models on NFS
 export HF_HOME="/workspace/.cache/huggingface"
 
@@ -7,7 +11,10 @@ export PIP_CACHE_DIR="/workspace/.cache/pip"
 # Persistent storage path
 install_root="/workspace"
 
+# kohya_ss doesn't handle being on a network volume very well
 kohya_ss_parent="/opt"
+# Use /workspace if /workspace isn't a network volume
+#kohya_ss_parent="/workspace"
 kohya_ss_dir="${kohya_ss_parent}/kohya_ss"
 
 # Having the venv on NFS makes ComfyUI start up extremely slow
@@ -27,4 +34,5 @@ extra_apt_packages="
     psmisc
     rsync
     imagemagick
+    less
 "

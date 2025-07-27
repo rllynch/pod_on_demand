@@ -41,6 +41,9 @@
     <div class="container">
         <h1>Starting {{ name }} Service</h1>
         <div class="spinner"></div>
+{% if reason is defined %}
+        <p>{{ reason }}</p>
+{% endif %}
         <p>Please wait while the service initializes...</p>
         <p>This page will automatically refresh every 15 seconds.</p>
     </div>

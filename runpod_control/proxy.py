@@ -15,6 +15,7 @@ import subprocess
 import argparse
 import socket
 import json
+import signal
 from datetime import datetime
 from time import time
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from config import get_config, setup_runpod
 from create import create_pod
 from resume import resume_pod
 from update_ssh_config import get_ssh_ip_port, update_ssh_config
+from stop import stop_pod
 from destroy import terminate_pod
 from utils import get_pod_info
 
@@ -135,6 +137,17 @@ async def handle_http_proxy(request, client_session, backend_url):
             )
     except (ConnectionResetError, ConnectionError, aiohttp.ClientError) as ex:
         logger.error(f'Connection error: {ex}')
+
+        if 'Connection reset by peer' in str(ex):
+            # Service not running yet
+            context = {
+                'name': request.app['name'],
+                'reason': str(ex),
+            }
+            response = aiohttp_jinja2.render_template("starting.html", request,
+                                            context=context)
+            return response
+
         return web.Response(status=502, text='Bad Gateway - Connection error')
 
 async def handle_proxy_request(request):
@@ -159,7 +172,7 @@ async def handle_proxy_request(request):
     if not is_web_socket and start_pod:
         # Don't start the pod for websocket connections - only for regular HTTP requests
         if not request.app['state'].need_pod:
-            logger.info(f"{request.app['name']} web activity detected, starting pod")
+            logger.info(f"{request.app['name']} web activity detected, starting pod ({request.raw_path})")
         request.app['state'].last_web_activity = time()
         request.app['state'].need_pod = True
         logger.debug(f'Web activity: {request.raw_path}')
@@ -320,8 +333,17 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
                         task['last_run'] = time()
 
             if pod_state.pod_running and not need_pod:
-                logger.info("Destroying pod...")
-                terminate_pod()
+                if config['runpod']['pod'].get('network_volume_id'):
+                    # Using a network volume so pod can be destroyed
+                    logger.info("Destroying pod...")
+                    terminate_pod()
+                else:
+                    # Using a local volume, stop pod so workspace volume isn't lost
+                    logger.info("Stopping pod...")
+                    stop_pod()
+                if ssh_state.ssh_proc and ssh_state.ssh_proc.returncode is None:
+                    logger.info("Sending SIGTERM to ssh process...")
+                    ssh_state.ssh_proc.send_signal(signal.SIGTERM)
                 pod_state.pod_running = False
                 pod_state.pod_start_time = 0
                 pod_state.cpu_mem_gb = 0
@@ -420,13 +442,14 @@ async def monitor_ssh(ssh_state, pod_state, config):
                     config['ssh']['status_command']
                 ]
                 logger.info(f"Running command: {' '.join(cmd)}")
-                proc = await asyncio.create_subprocess_exec(*cmd, preexec_fn=os.setpgrp,
+                ssh_state.ssh_proc = await asyncio.create_subprocess_exec(*cmd, preexec_fn=os.setpgrp,
                                                             stdout=asyncio.subprocess.PIPE,
                                                             stderr=asyncio.subprocess.STDOUT)
 
-                await handle_ssh_output(proc, ssh_state, config['ssh'])
-                await proc.wait()
+                await handle_ssh_output(ssh_state.ssh_proc, ssh_state, config['ssh'])
+                await ssh_state.ssh_proc.wait()
                 ssh_state.ssh_running = False
+                ssh_state.ssh_proc = None
                 for metric in metrics:
                     setattr(ssh_state, metric, 0)
                 logger.info("SSH connection closed.")
@@ -728,7 +751,7 @@ def main():
         ),
 
         ssh=SimpleNamespace(
-            ssh_running=False,
+            ssh_running=False, ssh_proc=None,
             cpu_util=0, gpu_util=0, cpu_mem_gb=0, gpu_mem_gb=0,
             last_activity=0, need_pod=False,
             ssh_ip=None, ssh_port=None,

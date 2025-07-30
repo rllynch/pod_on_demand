@@ -17,9 +17,13 @@ echo "$0 is starting"
 cat << EOF > "${script_dir}/.env.sh"
 export MODELS="$MODELS"
 export SETUP_SCRIPTS="$SETUP_SCRIPTS"
+export RUN_SCRIPTS="$RUN_SCRIPTS"
 EOF
 
 echo "Running ${script_dir}/setup.sh ..."
 ${script_dir}/setup.sh
+
+echo "Running ${script_dir}/run.sh ..."
+${script_dir}/run.sh
 
 echo "$0 has finished"

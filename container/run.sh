@@ -10,11 +10,6 @@ script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 . "${script_dir}/common.sh"
 
-########################################################################################
-
-for model in \
-    "llama3.2:latest" \
-    "gemma3:latest"
-do
-    ollama pull $model
+for script in $RUN_SCRIPTS ; do
+  ${script_dir}/$script
 done

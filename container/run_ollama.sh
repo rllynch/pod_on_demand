@@ -28,3 +28,13 @@ else
     tail --retry -f nohup.out &
     sleep 5
 fi
+
+########################################################################################
+# Pull models
+
+for model in \
+    "llama3.2:latest" \
+    "gemma3:latest"
+do
+    ollama pull $model
+done

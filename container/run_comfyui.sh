@@ -20,9 +20,10 @@ if pgrep -f "main.py" > /dev/null ; then
 else
     # Not running
     echo "Starting ComfyUI..."
-    nohup python main.py --listen 127.0.0.1 --port 9020 &
-    tail --retry -f nohup.out &
-
+    nohup python main.py --listen 127.0.0.1 --port 9020 2> /dev/null > /dev/null < /dev/null &
+    if [ "${TAIL_LOGS:-1}" -eq 1 ]; then
+        tail --retry -f nohup.out &
+    fi
 fi
 
 iter=0

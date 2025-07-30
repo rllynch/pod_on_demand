@@ -21,9 +21,11 @@ else
     # Not running
     echo "Starting Kohya_ss..."
     rm -f nohup.out
-    no_proxy="localhost, 127.0.0.1, ::1" nohup ./gui.sh --headless --listen 127.0.0.1 --server_port 7860  > kohya_output.log 2>&1 &
+    no_proxy="localhost, 127.0.0.1, ::1" nohup ./gui.sh --headless --listen 127.0.0.1 --server_port 7860  > kohya_output.log 2>&1 < /dev/null &
     sleep 1
-    tail --retry -f kohya_output.log &
+    if [ "${TAIL_LOGS:-1}" -eq 1 ]; then
+        tail --retry -f kohya_output.log &
+    fi
 fi
 
 iter=0

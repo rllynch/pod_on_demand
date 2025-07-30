@@ -24,8 +24,10 @@ if pgrep -x "ollama" > /dev/null ; then
 else
     # Not running
     echo "Starting Ollama server..."
-    nohup ollama serve &
-    tail --retry -f nohup.out &
+    nohup ollama serve 2> /dev/null > /dev/null < /dev/null &
+    if [ "${TAIL_LOGS:-1}" -eq 1 ]; then
+        tail --retry -f nohup.out &
+    fi
     sleep 5
 fi
 

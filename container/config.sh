@@ -37,4 +37,5 @@ extra_apt_packages="
     imagemagick
     less
     python3.13
+    xutils-dev
 "

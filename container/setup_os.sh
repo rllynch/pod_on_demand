@@ -24,14 +24,12 @@ if [ $do_apt_upgrade -ne 0 ]; then
 fi
 
 if [ -d "${install_root}/home" ]; then
-    echo "rsync'ing home directory from ${install_root}/home to /root"
-
-    # This needs to happen after installing $extra_apt_packages
-    # Additionally, extra_apt_packages must contain rsync
-    rsync -rltv \
-        "${install_root}/home/" /root/
+    # Create symlinks from /root to /workspace/home for files like .vimrc, .gitconfig, etc.
+    # This will create a symlink for each file so it's not suitable for symlinking
+    # .cache, .config, etc.
+    lndir /workspace/home/ /root/
 else
-    echo "No home directory found at ${install_root}/home, skipping rsync."
+    echo "No home directory found at ${install_root}/home, skipping creating symlinks."
 fi
 
 # This is mostly for interactive use - HF_HOME and PIP_CACHE_DIR already point at /workspace/.cache

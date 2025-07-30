@@ -33,6 +33,7 @@ extra_apt_packages="
     ncdu
     psmisc
     rsync
+    rclone
     imagemagick
     less
     python3.13

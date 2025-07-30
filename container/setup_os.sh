@@ -37,3 +37,7 @@ fi
 # This is mostly for interactive use - HF_HOME and PIP_CACHE_DIR already point at /workspace/.cache
 rm -rf /root/.cache
 ln -sf /workspace/.cache /root/.cache
+
+# This is primarily for rclone's config
+rm -rf /root/.config
+ln -sf /workspace/.config /root/.config

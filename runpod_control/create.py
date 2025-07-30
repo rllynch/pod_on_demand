@@ -51,7 +51,14 @@ def create_pod():
 
     logger.debug(f'Pod configuration: {kwargs}')
 
-    new_pod = runpod.create_pod(**kwargs)
+    try:
+        new_pod = runpod.create_pod(**kwargs)
+    except ValueError as ex:
+        logger.error(f'Failed to create pod: {ex}')
+        logger.error('Available GPUs:')
+        for info in runpod.get_gpus():
+            logger.error(f" - {info['id']}")
+        raise ex
     logger.info(f'New pod: {new_pod}')
 
     return new_pod

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.13
 
 # SPDX-FileCopyrightText: Copyright (c) 2025 Richard L. Lynch <rich@richlynch.com>
 # SPDX-License-Identifier: MIT
@@ -9,7 +9,11 @@ from pathlib import Path
 def main():
     root = Path('/workspace')
     excluded_globs = [
-        '/workspace/.cache',
+        '/workspace/.cache/Microsoft/**/*',
+        '/workspace/.cache/huggingface/hub/**/*',
+        '/workspace/.cache/huggingface/xet/**/*',
+        '/workspace/.cache/pip/**/*',
+        '/workspace/.cache/rclone/**/*',
         '/workspace/ComfyUI/custom_nodes/comfyui-manager',
         '/workspace/ComfyUI/models/**/*',
         '/workspace/scripts',
@@ -22,7 +26,7 @@ def main():
     backup_paths = []
 
     for path in root.glob('*'):
-        if any(path.match(excl) for excl in excluded_globs):
+        if any(path.full_match(excl) for excl in excluded_globs):
             continue
 
         if (path/'.git').is_dir():
@@ -37,17 +41,27 @@ def main():
                 fn = line.rstrip()[3:]
                 full_path = path/fn
 
-                if any(full_path.match(excl) for excl in excluded_globs):
+                if any(full_path.full_match(excl) for excl in excluded_globs):
                     continue
 
-                print(full_path)
+                if full_path.is_dir():
+                    for subpath in full_path.glob('**/*'):
+                        if not subpath.is_dir():
+                            backup_paths.append(subpath)
+                else:
+                    backup_paths.append(full_path)
 
             continue
 
         # Regular dir
-        backup_paths.append(path)
+        if path.is_dir():
+            for subpath in path.glob('**/*'):
+                if not subpath.is_dir() and not any(subpath.full_match(excl) for excl in excluded_globs):
+                    backup_paths.append(subpath)
+        else:
+            backup_paths.append(path)
 
-    for path in backup_paths:
+    for path in sorted(backup_paths):
         print(path)
 
 if __name__ == "__main__":

@@ -35,4 +35,5 @@ extra_apt_packages="
     rsync
     imagemagick
     less
+    python3.13
 "

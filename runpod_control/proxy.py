@@ -26,10 +26,8 @@ import aiohttp
 from aiohttp import web
 import aiohttp_jinja2
 
-import runpod
-
 from config import get_config, setup_runpod
-from create import create_pod
+from create import create_pod, pod_env
 from resume import resume_pod
 from update_ssh_config import get_ssh_ip_port, update_ssh_config
 from stop import stop_pod
@@ -232,6 +230,7 @@ async def status_reporter(global_state):
     last_report_time = 0
     last_pod_running = None
     last_ssh_running = None
+    last_bootstrap_running = None
     max_report_interval = 60
 
     while True:
@@ -249,12 +248,17 @@ async def status_reporter(global_state):
             do_report = True
             state_change = True
 
+        if last_bootstrap_running != global_state.ssh.bootstrap_running:
+            do_report = True
+            state_change = True
+
         if do_report:
             log_func = logger.info if global_state.pod.pod_running or state_change else logger.debug
             last_web_activity = max([proxy.last_web_activity for proxy in global_state.proxies])
             last_web_activity = f'{(time()-last_web_activity)/60:.1f} minutes ago' if last_web_activity else 'never'
             last_cpu_gpu_activity = f'{(time()-global_state.ssh.last_activity)/60:.1f} minutes ago' if global_state.ssh.last_activity else 'never'
             log_func(f"pod_running={global_state.pod.pod_running}, "
+                        f"bootstrap_running={global_state.ssh.bootstrap_running}, "
                         f"ssh_running={global_state.ssh.ssh_running}, "
                         f"last_web_activity={last_web_activity}, "
                         f"cpu_util={global_state.ssh.cpu_util:.0f}%, "
@@ -266,6 +270,7 @@ async def status_reporter(global_state):
             last_report_time = time()
             last_pod_running = global_state.pod.pod_running
             last_ssh_running = global_state.ssh.ssh_running
+            last_bootstrap_running = global_state.ssh.bootstrap_running
 
         await asyncio.sleep(1)
 
@@ -293,7 +298,7 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
     check_pod_interval = config['web']['check_pod_interval']
     periodic_tasks = config['periodic_tasks']
     for task_name, task in periodic_tasks.items():
-        task['last_run'] = 0
+        task['last_run'] = time()
 
     while True:
         try:
@@ -316,7 +321,7 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
                 await asyncio.sleep(startup_wait_time)
                 pod_state.need_ssh = True
 
-            if pod_state.pod_running:
+            if pod_state.pod_running and ssh_state.ssh_running:
                 # Check if any periodic tasks need to run
                 for task_name, task in periodic_tasks.items():
                     if time() - task['last_run'] >= task['interval']:
@@ -333,7 +338,11 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
                         task['last_run'] = time()
 
             if pod_state.pod_running and not need_pod:
-                if config['runpod']['pod'].get('network_volume_id'):
+                # If the config contains a terminate_pod setting then follow it
+                # Otherwise, terminate if a network volume is used, or stop the pod otherwise.
+                do_terminate_pod = config['runpod'].get('terminate_pod',
+                    config['runpod']['pod'].get('network_volume_id'))
+                if do_terminate_pod:
                     # Using a network volume so pod can be destroyed
                     logger.info("Destroying pod...")
                     terminate_pod()
@@ -358,6 +367,15 @@ async def monitor_pod(pod_state, proxies_state, ssh_state, config):
             pod_state.need_ssh = False
             await asyncio.sleep(30)
 
+async def handle_bootstrap_output(proc):
+    """Handle the output from one of the bootstrap commands."""
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break  # EOF
+        line = line.decode('utf-8', errors='ignore').strip()
+        logger.info(f"Bootstrap output: {line}")
+
 async def handle_ssh_output(proc, ssh_state, ssh_config):
     """
     Handle the utilization metrics from status_loop.py on the pod.
@@ -368,6 +386,10 @@ async def handle_ssh_output(proc, ssh_state, ssh_config):
         if not line:
             break  # EOF
         line = line.decode('utf-8', errors='ignore').strip()
+        if ssh_config['status_command'] in line and 'No such file or directory' in line:
+            logger.info('Pod workspace not initialized - executing bootstrap command...')
+            ssh_state.need_bootstrap = True
+            continue
         if not line.startswith('{'):
             logger.info(f"SSH output: {line}")
             continue
@@ -381,6 +403,8 @@ async def handle_ssh_output(proc, ssh_state, ssh_config):
 
         for key, value in data.items():
             setattr(ssh_state, key, value)
+
+        ssh_state.ssh_running = True
 
         is_active = ssh_state.cpu_util >= ssh_config['cpu_util_threshold'] or ssh_state.gpu_util >= ssh_config['gpu_util_threshold']
         if is_active != last_was_active:
@@ -399,6 +423,71 @@ async def handle_ssh_output(proc, ssh_state, ssh_config):
             else:
                 logger.info("Immediate shutdown requested, setting need_pod to False for SSH")
             ssh_state.need_pod = False
+
+async def bootstrap_pod(ssh_state, config):
+    '''Bootstrap a pod with an empty /workspace volume'''
+    logger.info("Generating bootstrap tarball...")
+    tarball_fn = script_dir / 'bootstrap.tar.gz'
+    tar_cmd = [
+        'tar',
+        '-C', script_dir.parent,
+        '-cvzf',
+        str(tarball_fn),
+    ] + config['bootstrap']['files']
+    tar_proc = await asyncio.create_subprocess_exec(*tar_cmd, preexec_fn=os.setpgrp,
+                                                    stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT)
+    await handle_bootstrap_output(tar_proc)
+    await tar_proc.wait()
+
+    scp_cmd = [
+        'scp',
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-P', str(ssh_state.ssh_port),
+        str(tarball_fn),
+        f'root@{ssh_state.ssh_ip}:/tmp/bootstrap.tar.gz',
+    ]
+    logger.info(f"Running scp command: {' '.join(scp_cmd)}")
+    scp_proc = await asyncio.create_subprocess_exec(*scp_cmd, preexec_fn=os.setpgrp,
+                                                    stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT)
+    await handle_bootstrap_output(scp_proc)
+    await scp_proc.wait()
+
+    tarball_fn.unlink()
+
+    remote_forward_args = []
+    for cfg in config['bootstrap'].get('remote_forward', []):
+        remote_forward_args += ['-R', f'{cfg["remote_addr_port"]}:{cfg["local_addr_port"]}']
+
+    env_dict = pod_env(config)
+    env_dict['TAIL_LOGS'] = '0' # Tailing logs will result in ssh not exiting
+    env_dict['BOOTSTRAP_REPO'] = config['bootstrap']['repo']
+    env_str = ' '.join(f'{key}="{value}"' for key, value in env_dict.items())
+
+    bootstrap_cmd = [
+        'ssh',
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-p', str(ssh_state.ssh_port),
+        '-A',
+    ] + remote_forward_args + [
+        f'root@{ssh_state.ssh_ip}',
+        'cd /tmp && ' +
+        'tar -xvzf bootstrap.tar.gz && ' +
+        'rm -f bootstrap.tar.gz && ' +
+        'cd container && ' +
+        'chmod +x bootstrap.sh && ' +
+        f'{env_str} ./bootstrap.sh'
+    ]
+    logger.info(f"Running bootstrap command: {' '.join(bootstrap_cmd)}")
+    bootstrap_proc = await asyncio.create_subprocess_exec(*bootstrap_cmd, preexec_fn=os.setpgrp,
+                                                          stdout=asyncio.subprocess.PIPE,
+                                                          stderr=asyncio.subprocess.STDOUT)
+    await handle_bootstrap_output(bootstrap_proc)
+    await bootstrap_proc.wait()
+    logger.info("Bootstrap complete")
 
 async def monitor_ssh(ssh_state, pod_state, config):
     """
@@ -421,7 +510,6 @@ async def monitor_ssh(ssh_state, pod_state, config):
 
                 logger.debug(f"Seconds since pod start: {time()-pod_state.pod_start_time:.0f}")
                 logger.info(f"Establishing SSH connection to pod at {ssh_state.ssh_ip}:{ssh_state.ssh_port}...")
-                ssh_state.ssh_running = True
 
                 port_forward_args = []
                 for _, port_cfg in config['web']['proxies'].items():
@@ -450,9 +538,17 @@ async def monitor_ssh(ssh_state, pod_state, config):
                 await ssh_state.ssh_proc.wait()
                 ssh_state.ssh_running = False
                 ssh_state.ssh_proc = None
+
                 for metric in metrics:
                     setattr(ssh_state, metric, 0)
                 logger.info("SSH connection closed.")
+
+                if ssh_state.need_bootstrap:
+                    ssh_state.bootstrap_running = True
+                    await bootstrap_pod(ssh_state, config)
+                    ssh_state.bootstrap_running = False
+                    ssh_state.need_bootstrap = False
+
                 await asyncio.sleep(10)
             else:
                 await asyncio.sleep(30)
@@ -473,11 +569,11 @@ async def update_ssh_config_task(ssh_state):
     last_ssh_running = False
     while True:
         try:
-            if not last_ssh_running and ssh_state.ssh_running:
+            if not last_ssh_running and (ssh_state.ssh_running or ssh_state.bootstrap_running):
                 await update_ssh_config(wait=True, replace=True, prompt_replace=False)
                 last_ssh_running = True
 
-            if last_ssh_running and not ssh_state.ssh_running:
+            if last_ssh_running and not (ssh_state.ssh_running or ssh_state.bootstrap_running):
                 last_ssh_running = False
 
         except Exception as ex: # pylint: disable=broad-exception-caught
@@ -631,6 +727,7 @@ async def handle_status(request):
         'gpu_util': f'{global_state.ssh.gpu_util:.0f}%',
         'cpu_mem': f'{global_state.ssh.cpu_mem_gb:.1f}/{global_state.pod.cpu_mem_gb:.1f}GB',
         'gpu_mem': f'{global_state.ssh.gpu_mem_gb:.1f}/{global_state.pod.gpu_mem_gb:.1f}GB',
+        'bootstrap_running': global_state.ssh.bootstrap_running,
         'ssh_running': global_state.ssh.ssh_running,
         'ssh_ip': global_state.ssh.ssh_ip,
         'ssh_port': global_state.ssh.ssh_port,
@@ -752,6 +849,7 @@ def main():
 
         ssh=SimpleNamespace(
             ssh_running=False, ssh_proc=None,
+            need_bootstrap=False, bootstrap_running=False,
             cpu_util=0, gpu_util=0, cpu_mem_gb=0, gpu_mem_gb=0,
             last_activity=0, need_pod=False,
             ssh_ip=None, ssh_port=None,

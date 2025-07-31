@@ -286,12 +286,12 @@
 
             <div class="status-card">
                 <h3>
-                    <span class="status-indicator {% if ssh_running %}status-running{% else %}status-stopped{% endif %}"></span>
+                    <span class="status-indicator {% if ssh_running %}status-running{% elif bootstrap_running %}status-starting{% else %}status-stopped{% endif %}"></span>
                     SSH Connection
                 </h3>
                 <div class="metric">
                     <span class="metric-label">Status:</span>
-                    <span class="metric-value">{{ 'Connected' if ssh_running else 'Disconnected' }}</span>
+                    <span class="metric-value">{{ 'Connected' if ssh_running else 'Bootstrapping' if bootstrap_running else 'Disconnected' }}</span>
                 </div>
                 <div class="metric">
                     <span class="metric-label">SSH IP:</span>
